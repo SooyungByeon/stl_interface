@@ -147,7 +147,7 @@ def plot_mission(
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("East  px (km)", fontsize=11)
     ax.set_ylabel("North  py (km)", fontsize=11)
-    ax.set_title("Top-down trajectory over terrain", fontsize=12)
+    ax.set_title("Trajectory over terrain (Los Angeles)", fontsize=12)
     ax.legend(loc="upper left", fontsize=8, framealpha=0.85)
     ax.grid(True, linewidth=0.4, alpha=0.4)
 

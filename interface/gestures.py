@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Tuple
 
 from planner.geometry import Rect
 from planner.stl import (
-    STLNode, And, Or, Always, Eventually, InRect, InCircle,
+    STLNode, And, Or, Always, Eventually, Until, InRect, InCircle,
     OutsideRect, OutsideVelocityRect,
 )
 
@@ -111,10 +111,12 @@ class GestureProgram:
 
     def add_requirement(self, kind: str, region_names: List[str],
                         window: Optional[Tuple[int, int]] = None) -> Requirement:
-        if kind not in ("reach", "keep"):
+        if kind not in ("reach", "keep", "until"):
             raise ValueError(kind)
         if not region_names:
             raise ValueError("a requirement needs at least one region")
+        if kind == "until" and len(region_names) != 2:
+            raise ValueError("until takes exactly [key, door]")
         for n in region_names:
             if n not in self.regions:
                 raise ValueError(f"unknown region {n!r}")
@@ -125,8 +127,21 @@ class GestureProgram:
 
     def can_merge(self, a: Requirement, b: Requirement) -> bool:
         """Two requirements may be OR-combined iff same operator and same window
-        (◇(A∨B) ≡ ◇A∨◇B and □(A∨B) only when the windows coincide)."""
-        return a is not b and a.kind == b.kind and a.window == b.window
+        (◇(A∨B) ≡ ◇A∨◇B and □(A∨B) only when the windows coincide).
+        Until requirements are not OR-combined."""
+        return (a is not b and a.kind == b.kind and a.window == b.window
+                and a.kind in ("reach", "keep"))
+
+    def absorb_reach_into_until(self, until_req: Requirement) -> Optional[str]:
+        """Drop a single-region reach on the until's key with the same window, since
+        ¬door U key already entails ◇key. Returns the removed gid, or None."""
+        key = until_req.region_names[0]
+        for r in list(self.requirements):
+            if (r is not until_req and r.kind == "reach"
+                    and r.region_names == [key] and r.window == until_req.window):
+                self.requirements.remove(r)
+                return r.gid
+        return None
 
     def merge_or(self, anchor: Requirement, other: Requirement) -> Requirement:
         """Fold `other` into `anchor` as a disjunction and drop `other`."""
@@ -150,6 +165,12 @@ class GestureProgram:
         authored: List[STLNode] = []
         for req in self.requirements:
             t1, t2 = req.window if req.window is not None else (0, T)
+            if req.kind == "until":
+                key, door = req.region_names              # [key, door]
+                Kr, Dr = self.regions[key], self.regions[door]
+                authored.append(Until(t1, t2, OutsideRect(Dr.name, Dr.rect),
+                                      InRect(Kr.name, Kr.rect)))
+                continue
             if req.kind == "keep":
                 # keep over a disjunction = □(π1∨…∨πn): stay in the union (K1).
                 preds = [self.regions[n].predicate() for n in req.region_names]
@@ -180,6 +201,10 @@ class GestureProgram:
             return f"[{req.window[0]},{req.window[1]}]"
         lines: List[str] = []
         for req in self.requirements:
+            if req.kind == "until":
+                key, door = req.region_names
+                lines.append(f"¬{door} U_{win(req)} {key}      ({req.gid})")
+                continue
             body = (req.region_names[0] if len(req.region_names) == 1
                     else "(" + " ∨ ".join(req.region_names) + ")")
             op = "□" if req.kind == "keep" else "◇"
@@ -200,6 +225,12 @@ class GestureProgram:
         """
         sigs: List[Tuple[str, Optional[Requirement], str]] = []
         for req in self.requirements:
+            if req.kind == "until":
+                key, door = req.region_names
+                lbl = f"until ¬{door} U {key}"
+                sigs.append((f"until_goal_{key}[", req, lbl))     # reach-key constraints
+                sigs.append((f"until_safe_{door}[", req, lbl))    # avoid-door constraints
+                continue
             single = len(req.region_names) == 1
             label = f"{req.kind} " + (req.region_names[0] if single
                                       else "(" + "∨".join(req.region_names) + ")")
@@ -241,23 +272,35 @@ class GestureProgram:
                                           "umin", "umax", "v_max_hp")):
                     struct = True
 
-        # report text
+        return self.make_report(reqs, environment=env, structural=struct)
+
+    def make_report(self, reqs: List[Requirement], *, environment: bool = False,
+                    structural: bool = False) -> IISReport:
+        """Build an IISReport (text + regions to highlight) from implicated gestures."""
+        regions: List[str] = []
+        for r in reqs:
+            regions.extend(r.region_names)
         parts: List[str] = []
         if reqs:
             parts.append("Conflicting gestures:")
             for r in reqs:
                 w = "[0,T]" if r.window is None else f"[{r.window[0]},{r.window[1]}]"
-                tgt = (r.region_names[0] if len(r.region_names) == 1
-                       else "(" + "∨".join(r.region_names) + ")")
                 wn = f"  + window {r.window_gid}" if r.window_gid else ""
-                parts.append(f"  • {r.kind} {tgt}  {w}   ({r.gid}{wn})")
-        if env:
+                if r.kind == "until":
+                    key, door = r.region_names
+                    desc = f"until ¬{door} U {key}"
+                else:
+                    tgt = (r.region_names[0] if len(r.region_names) == 1
+                           else "(" + "∨".join(r.region_names) + ")")
+                    desc = f"{r.kind} {tgt}"
+                parts.append(f"  • {desc}  {w}   ({r.gid}{wn})")
+        if environment:
             parts.append("• environment (obstacle / speed floor) — a requirement "
                          "cannot be met in this map.")
         # The IIS always contains the dynamics constraints that connect the
         # implicated gestures; only report a structural cause when NO gesture or
         # environment predicate is at fault (a pure dynamics/bounds conflict).
-        if struct and not reqs and not env:
+        if structural and not reqs and not environment:
             parts.append("• dynamics / bounds limits (no single gesture is at fault).")
         if not parts:
             parts.append("Infeasible, but the IIS did not map to a gesture.")
@@ -265,9 +308,9 @@ class GestureProgram:
             parts.insert(0, "No satisfying trajectory at any horizon. Edit a "
                             "highlighted gesture (move/resize a region, or change a "
                             "window so they no longer compete).")
-        return IISReport(feasible=False, requirements=reqs,
-                         region_names=sorted(set(regions)), environment=env,
-                         structural=struct, text="\n".join(parts))
+        return IISReport(feasible=False, requirements=list(reqs),
+                         region_names=sorted(set(regions)), environment=environment,
+                         structural=structural, text="\n".join(parts))
 
 
 __all__ = ["Region", "Requirement", "IISReport", "GestureProgram"]

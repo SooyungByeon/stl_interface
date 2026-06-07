@@ -74,6 +74,10 @@ class PlanningProblem:
     Q: np.ndarray
     R: np.ndarray
     bigM: float = 1e3
+    until_margin: float = 0.5  # km; door of an Until is avoided inflated by this,
+                               # so a region cannot be grazed (closed "reach K" vs
+                               # open "avoid D" at a shared boundary) — keeps the
+                               # ordering of chained untils correct.
     cruise_z_ref: float = 1.2
     v_max: Optional[float] = None  # horizontal speed cap: n=12 circumscribed polygon, faces tangent to L2 circle at v_max
     Q_runway: float = 0.0  # weight on (xy) position-tracking toward the runway center (0 => disabled)
@@ -840,7 +844,11 @@ class MICPBuilder:
         if not isinstance(psi, InRect):
             raise NotImplementedError("Until right side must be InRect(K) in this project.")
 
-        d_rect = phi.rect
+        # Inflate the door by until_margin so it cannot be grazed on its boundary
+        # (closed "reach K" vs open "avoid D" would otherwise coincide at an edge
+        # when a region is both a key and a door in a chain of untils).
+        _m = float(self.p.until_margin)
+        d_rect = (phi.rect[0] - _m, phi.rect[1] + _m, phi.rect[2] - _m, phi.rect[3] + _m)
         d_name = phi.name
         k_rect = psi.rect
         k_name = psi.name

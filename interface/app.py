@@ -3,8 +3,9 @@ Click2STL authoring interface (PyQt6) — working interface for Example 1.
 
 Mode-based gestures (paper Table 1). Pick a tool on the left, then act on the map:
   - Region : drag to draw a rectangle referent.
-  - Reach  : click a region  -> ◇ reach requirement on it.
-  - Keep   : click a region  -> □ keep requirement on it.
+  - Eventually : click a region  -> ◇ (reach) requirement on it.
+  - Always     : click a region  -> □ (keep) requirement on it.
+  - Until      : drag from a key region to a door region -> ¬door U key.
   - Or     : click two existing requirements (by their regions) -> merge them into
              one disjunction ◇/□(R1 ∨ R2 ∨ …); originals are removed (keep clicking
              to fold in more). Same operator + same window required.
@@ -14,13 +15,14 @@ Mode-based gestures (paper Table 1). Pick a tool on the left, then act on the ma
 
 Start position and obstacles are environment-supplied, sampled with the same
 planner routine used by run_example1, and drawn on the map. Fixed runways G1
-(LAX) / G2 (Ontario) are pre-placed. Sequence / Until are stubbed.
+(LAX) / G2 (Ontario) are pre-placed.
 
 Run:  ./run_interface.sh   (or python -m interface.app)
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 
 import numpy as np
@@ -44,15 +46,18 @@ from planner.descriptor import _place_random_obstacles
 from .gestures import GestureProgram
 from .diagnosis import plan as plan_program
 
-MODES = ["Rect", "Circle", "Reach", "Keep", "Sequence", "Until", "Or", "Window"]
+MODES = ["Rect", "Circle", "Eventually", "Always", "Until", "Or", "Window"]
 MODE_HINT = {
-    "Rect":   "drag to draw a rectangular region",
-    "Circle": "drag from the centre outward to set the radius",
-    "Reach":  "click a region  →  ◇ reach",
-    "Keep":   "click a region  →  □ keep",
-    "Or":     "click two requirements (their regions) to combine into ◇/□(· ∨ ·)",
-    "Window": "click a requirement's region  →  type [t1, t2]",
+    "Rect":       "drag to draw a rectangular region",
+    "Circle":     "drag from the centre outward to set the radius",
+    "Eventually": "click a region  →  ◇ eventually (reach)",
+    "Always":     "click a region  →  □ always (keep)",
+    "Until":      "drag from a key region to the door region  →  ¬door U key",
+    "Or":         "click two requirements (their regions) to combine into ◇/□(· ∨ ·)",
+    "Window":     "click a requirement's region  →  type [t1, t2]",
 }
+# button label -> requirement kind
+_KIND = {"Eventually": "reach", "Always": "keep"}
 
 
 class MapCanvas(FigureCanvas):
@@ -60,14 +65,17 @@ class MapCanvas(FigureCanvas):
         self.fig = Figure(figsize=(8, 4.7))
         super().__init__(self.fig)
         self.ax = self.fig.add_subplot(111)
-        self.fig.subplots_adjust(left=0.07, right=0.99, top=0.93, bottom=0.11)
+        self.fig.subplots_adjust(left=0.13, right=0.99, top=0.93, bottom=0.12)
         self._bg = load_la_dem()
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, seed=None) -> None:
         super().__init__()
-        self.setWindowTitle("Click2STL — Authoring Interface")
+        # obstacle sampling seed: use the given one, else a fresh random seed
+        # (shown in the title so a run can be reproduced with ./run_interface.sh <seed>)
+        self.seed = int(seed) if seed is not None else int(np.random.default_rng().integers(1_000_000))
+        self.setWindowTitle(f"Click2STL — Authoring Interface   (obstacle seed {self.seed})")
         self.mode = "Rect"
 
         # ---- mission state ----
@@ -81,8 +89,11 @@ class MainWindow(QMainWindow):
         self.or_anchor = None           # requirement being OR-combined (Or tool)
         self.result = None
         self.iis_regions: set[str] = set()
+        self.iis_buttons: set[str] = set()   # palette buttons to flag red (e.g. Window)
         self._press = None
         self._rubber = None
+        self._until_start = None      # (key_name, (cx,cy)) while dragging an Until arrow
+        self._arrow = None
 
         # ---- widgets ----
         central = QWidget(); self.setCentralWidget(central)
@@ -95,9 +106,6 @@ class MainWindow(QMainWindow):
             b = QPushButton(g); b.setCheckable(True)
             b.clicked.connect(lambda _c, gg=g: self.set_mode(gg))
             palette.addWidget(b); self.btns[g] = b
-        for g in ("Sequence", "Until"):
-            self.btns[g].setEnabled(False)
-            self.btns[g].setToolTip("drag-arrow gesture — not yet wired")
         self.btns["Rect"].setChecked(True)
         palette.addStretch(1)
         self.clearstl_btn = QPushButton("Clear STL"); self.clearstl_btn.clicked.connect(self.action_clear_stl)
@@ -118,11 +126,12 @@ class MainWindow(QMainWindow):
         right.addWidget(QLabel("<b>STL specification</b>"))
         self.formula = QTextEdit(); self.formula.setReadOnly(True)
         self.formula.setPlaceholderText("(authored STL appears here)")
-        self.formula.setMinimumWidth(300)
+        self.formula.setMinimumWidth(200); self.formula.setMaximumWidth(240)
         right.addWidget(self.formula, 3)
-        right.addWidget(QLabel("<b>Infeasibility (IIS) resolution</b>"))
+        right.addWidget(QLabel("<b>Infeasibility resolution</b>"))
         self.iis = QTextEdit(); self.iis.setReadOnly(True)
         self.iis.setPlaceholderText("(on infeasible plans, the responsible gestures appear here)")
+        self.iis.setMinimumWidth(200); self.iis.setMaximumWidth(240)
         right.addWidget(self.iis, 2)
         root.addLayout(right, 0)
 
@@ -141,7 +150,7 @@ class MainWindow(QMainWindow):
 
     def _sample_obstacles(self):
         x_min, x_max, _, _ = self.bounds
-        rng = np.random.default_rng(0)
+        rng = np.random.default_rng(self.seed)
         rules = GeometryConstraints(
             min_goal_obstacle_clearance=4.0, min_start_obstacle_clearance=4.0,
             require_rects_in_bounds=True, require_start_in_bounds=True)
@@ -188,15 +197,22 @@ class MainWindow(QMainWindow):
                 return req
         return None
 
+    def region_center(self, name):
+        r = self.program.regions[name]
+        if r.shape == "circle" and r.circle is not None:
+            return (r.circle[0], r.circle[1])
+        x1, x2, y1, y2 = r.rect
+        return ((x1 + x2) / 2, (y1 + y2) / 2)
+
     def handle_region_click(self, name: str) -> None:
         """Apply the active tool to a clicked region (callable headlessly).
 
-        Reach/Keep create a single-region requirement. Or combines two EXISTING
+        Eventually/Always create a single-region requirement. Or combines two EXISTING
         same-operator, same-window requirements into one disjunction (and removes
         the originals), so there is no redundancy and no "Or first" ordering.
         """
-        if self.mode in ("Reach", "Keep"):
-            kind = "reach" if self.mode == "Reach" else "keep"
+        if self.mode in _KIND:
+            kind = _KIND[self.mode]
             self.last_req = self.program.add_requirement(kind, [name])
             self._invalidate()
             self.status(f"{kind} {name}   ({self.last_req.gid})")
@@ -229,7 +245,26 @@ class MainWindow(QMainWindow):
                 self.status(f"{name} has no requirement yet")
                 return
             self.action_window(req=req)
-        # Region mode handled by drag in on_press/on_release.
+        # Region / Until modes handled by drag in on_press/on_release.
+
+    def handle_until(self, key: str, door: str):
+        """Create an until requirement ¬door U key (callable headlessly).
+
+        Absorbs a redundant same-window reach on the key, since ¬door U key
+        already entails ◇key (keeps the authored spec free of redundant conjuncts).
+        """
+        if key == door:
+            self.status("Until: key and door must differ")
+            return None
+        req = self.program.add_requirement("until", [key, door])
+        removed = self.program.absorb_reach_into_until(req)
+        self.last_req = req
+        self._invalidate()
+        msg = f"until  ¬{door} U {key}   ({req.gid})"
+        if removed:
+            msg += f"   (absorbed redundant reach {removed})"
+        self.status(msg)
+        return req
 
     def action_window(self, t1=None, t2=None, req=None):
         req = req or self.last_req
@@ -269,20 +304,33 @@ class MainWindow(QMainWindow):
         self.result = res
         if res["feasible"]:
             self.iis_regions.clear()
+            self.iis_buttons.clear()
             self.iis.setPlainText("Feasible — trajectory found.")
             self.status(f"Feasible at T={res['T']}")
         else:
             rep = res["iis"]
             self.iis_regions = set(rep.region_names)
+            # flag the Window button if any implicated requirement carries a window
+            self.iis_buttons = {"Window"} if any(r.window_gid for r in rep.requirements) else set()
             self.iis.setPlainText(rep.text)
             self.status(f"INFEASIBLE at T={res['T']} — see IIS panel")
+        self._apply_button_highlights()
         self.redraw(); self.update_formula()
         return res
 
     def _invalidate(self):
         """A gesture edit invalidates any previous plan."""
-        self.result = None; self.iis_regions.clear()
+        self.result = None; self.iis_regions.clear(); self.iis_buttons.clear()
+        self._apply_button_highlights()
         self.redraw(); self.update_formula()
+
+    def _apply_button_highlights(self):
+        """Flag palette buttons in self.iis_buttons red; restore the rest."""
+        for name, b in self.btns.items():
+            if name in self.iis_buttons:
+                b.setStyleSheet("background-color: #ff6b6b; font-weight: bold;")
+            else:
+                b.setStyleSheet("")
 
     # ====================================================================
     # rendering
@@ -311,7 +359,8 @@ class MainWindow(QMainWindow):
         role_style = {
             "keep":   ("gold", "goldenrod", "--"),
             "reach":  ("deepskyblue", "blue", "--"),
-            "runway": ("red", "darkred", "-"),
+            "runway": ("royalblue", "navy", "-"),
+            "until":  ("mediumseagreen", "darkgreen", "--"),
             "region": ("white", "black", "--"),
         }
         anchor_names = set(self.or_anchor.region_names) if self.or_anchor else set()
@@ -334,6 +383,15 @@ class MainWindow(QMainWindow):
                              edgecolor=ec, alpha=alpha, linewidth=lw, linestyle=ls, zorder=4))
             ax.text(cx, cy, name, ha="center", va="center",
                     fontsize=10, fontweight="bold", zorder=7)
+
+        # until arrows: key --> door  (¬door U key)
+        for req in self.program.requirements:
+            if req.kind == "until":
+                key, door = req.region_names
+                ax.add_patch(mpatches.FancyArrowPatch(
+                    self.region_center(key), self.region_center(door),
+                    arrowstyle="-|>", mutation_scale=14, color="purple",
+                    linewidth=1.8, alpha=0.9, zorder=6))
 
         ax.plot(self.x0[0], self.x0[1], "^", color="limegreen", markersize=11,
                 markeredgecolor="black", zorder=8, label="start")
@@ -373,6 +431,17 @@ class MainWindow(QMainWindow):
             self._rubber = mpatches.Circle((event.xdata, event.ydata), 0.0, fill=False,
                                            edgecolor="black", linewidth=1.5, linestyle=":", zorder=12)
             self.canvas.ax.add_patch(self._rubber)
+        elif self.mode == "Until":
+            name = self.hit_region(event.xdata, event.ydata)
+            if name is None:
+                self.status("Until: start the drag on a key region")
+                return
+            c = self.region_center(name)
+            self._until_start = (name, c)
+            self._arrow = mpatches.FancyArrowPatch(c, (event.xdata, event.ydata),
+                                                   arrowstyle="-|>", mutation_scale=14,
+                                                   color="purple", linewidth=1.8, zorder=13)
+            self.canvas.ax.add_patch(self._arrow)
         else:
             name = self.hit_region(event.xdata, event.ydata)
             if name is not None:
@@ -381,7 +450,13 @@ class MainWindow(QMainWindow):
                 self.status(f"Mode: {self.mode} — click on a region")
 
     def on_motion(self, event) -> None:
-        if not self._press or event.inaxes is not self.canvas.ax or event.xdata is None:
+        if event.inaxes is not self.canvas.ax or event.xdata is None:
+            return
+        if self.mode == "Until" and self._until_start and self._arrow is not None:
+            self._arrow.set_positions(self._until_start[1], (event.xdata, event.ydata))
+            self.canvas.draw_idle()
+            return
+        if not self._press:
             return
         x0, y0 = self._press
         if self.mode == "Rect":
@@ -394,6 +469,18 @@ class MainWindow(QMainWindow):
             self.canvas.draw_idle()
 
     def on_release(self, event) -> None:
+        if self.mode == "Until":
+            if not self._until_start:
+                return
+            key = self._until_start[0]; self._until_start = None
+            if self._arrow is not None:
+                self._arrow.remove(); self._arrow = None
+            door = None if event.xdata is None else self.hit_region(event.xdata, event.ydata)
+            if door is None or door == key:
+                self.status("Until: release on the door region (a different region)")
+                self.redraw(); return
+            self.handle_until(key, door)
+            return
         if self.mode not in ("Rect", "Circle") or not self._press:
             return
         x0, y0 = self._press; self._press = None
@@ -427,8 +514,12 @@ class MainWindow(QMainWindow):
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("seed", nargs="?", type=int, default=None,
+                    help="obstacle sampling seed (omit for a random one)")
+    args, _ = ap.parse_known_args()
     app = QApplication(sys.argv)
-    win = MainWindow(); win.resize(1280, 600); win.show()
+    win = MainWindow(seed=args.seed); win.resize(1040, 500); win.show()
     sys.exit(app.exec())
 
 
