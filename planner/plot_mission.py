@@ -50,7 +50,8 @@ def plot_mission(
     v_max: float,
     cruise_z: float,
     png_path: str,
-    landing_z: Optional[Sequence[float]] = None,  # (z_lo, z_hi) km landing band
+    landing_z: Optional[Sequence[float]] = None,    # (z_lo, z_hi) km landing band
+    delivery_z: Optional[Sequence[float]] = None,   # (z_lo, z_hi) km delivery band
     subtitle: Optional[str] = None,
 ) -> None:
     px, py, pz = X[:, 0], X[:, 1], X[:, 2]
@@ -155,6 +156,9 @@ def plot_mission(
     ax.plot(t_min, pz, "-", color="steelblue", linewidth=1.8, label="altitude pz")
     ax.axhline(cruise_z, color="darkorange", linewidth=1.2, linestyle="--",
                label=f"cruise ref {cruise_z:.2f} km")
+    if delivery_z is not None:
+        ax.axhspan(float(delivery_z[0]), float(delivery_z[1]), alpha=0.25, color="limegreen",
+                   label=f"delivery band [{float(delivery_z[0]):.2f}, {float(delivery_z[1]):.2f}] km")
     if landing_z is not None:
         ax.axhspan(float(landing_z[0]), float(landing_z[1]), alpha=0.30, color="red",
                    label=f"landing band [{float(landing_z[0]):.2f}, {float(landing_z[1]):.2f}] km")
@@ -166,12 +170,16 @@ def plot_mission(
 
     # ── Right-bottom: horizontal airspeed ─────────────────────────────────
     ax = ax_spd
+    # The v_max cap is a 24-facet polygon circumscribing the speed circle, so the
+    # achievable horizontal speed reaches v_max / cos(pi/24) at the corners.
+    v_cap = v_max / float(np.cos(np.pi / 24))
     ax.plot(t_min, v_horiz, "-", color="darkorange", linewidth=1.8,
             label="horizontal speed ‖(vx,vy)‖")
     ax.axhline(v_min, color="firebrick", linestyle="-.", linewidth=1.3,
                label=f"v_min floor {v_min*1000:.0f} m/s")
-    ax.axhline(v_max, color="black", linestyle="--", linewidth=1.3,
-               label=f"v_max cap {v_max*1000:.0f} m/s")
+    ax.axhline(v_cap, color="black", linestyle="--", linewidth=1.3,
+               label=f"v_max cap {v_cap*1000:.1f} m/s")
+    ax.set_ylim(0.0, v_cap * 1.18)
     ax.set_xlabel("Mission time (min)", fontsize=10)
     ax.set_ylabel("Speed (km/s)", fontsize=10)
     ax.set_title("Horizontal airspeed", fontsize=12)

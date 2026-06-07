@@ -3,7 +3,7 @@ Build, solve, and plot a paper mission (1, 2, or 3) on the shared LA frame.
 
     Mission 1  keep H, then land:        □H ∧ ◇(G1∨G2)
     Mission 2  timed deliveries, land:   ⋀ ◇P_i ∧ ◇(G1∨G2)
-    Mission 3  door–key (until), land:   ⋀(¬D_i U K_i) ∧ ◇(G1∨G2)
+    Mission 3  checkpoints via until:    (¬G1 U R1) ∧ (¬G1 U R2) ∧ ◇G1
 
 Environment (start, 5 obstacles, speed floor) is supplied automatically with the
 same sampler as the interface. Minimum horizon T* is found by bisection.
@@ -87,30 +87,29 @@ def geometry(ex: int):
                     v_min=la.V_MIN, grace_lo=la.GRACE_LO, grace_hi=la.GRACE_HI,
                     goal_z_range=LANDING_Z)
             return ast_fn
-        return plot, avoid, factory, (12, 72)
+        return plot, avoid, factory, (12, 50)
 
     if ex == 3:
-        # two door–key pairs (keys near the SE start, doors guarding the west
-        # approach), then land. Reach each key before its door is allowed.
-        K1 = la.box(108.0, 110.0, 2.0); D1 = la.box(76.0, 80.0, 109.0, 113.0)
-        K2 = la.box(101.0, 95.0, 2.0);  D2 = la.box(82.0, 84.0, 99.0, 103.0)
-        dk = [("D1", D1, "K1", K1), ("D2", D2, "K2", K2)]
-        plot = ([{"name": "K1", "role": "key", "rect": K1},
-                 {"name": "K2", "role": "key", "rect": K2},
-                 {"name": "D1", "role": "door", "rect": D1},
-                 {"name": "D2", "role": "door", "rect": D2}] + RUNWAY_PLOT)
-        avoid = {"K1": K1, "K2": K2, "D1": D1, "D2": D2, "G1": G1, "G2": G2}
+        # Must visit both checkpoints R1, R2 before landing: avoid the runway G1
+        # until each checkpoint is reached.
+        #   φ = (¬G1 U R1) ∧ (¬G1 U R2) ∧ ◇G1   (+ env)
+        R1 = la.box(95.0, 120.0, 2.5)           # checkpoint 1 (north-central)
+        R2 = la.box(85.0, 95.0, 2.5)            # checkpoint 2 (south-central)
+        dk = [("G1", G1, "R1", R1), ("G1", G1, "R2", R2)]   # door = runway G1
+        plot = ([{"name": "R1", "role": "key", "rect": R1},
+                 {"name": "R2", "role": "key", "rect": R2}] + RUNWAY_PLOT)
+        avoid = {"R1": R1, "R2": R2, "G1": G1, "G2": G2}
 
         def factory(obstacles):
             def ast_fn(T):
                 return make_paper_example_3(
                     T=T,
                     doorkeys=[(dn, dr, kn, kr, None) for dn, dr, kn, kr in dk],
-                    goal_rects=RUNWAYS, goal_window=None, obstacles=obstacles,
+                    goal_rects=[("G1", G1)], goal_window=None, obstacles=obstacles,
                     v_min=la.V_MIN, grace_lo=la.GRACE_LO, grace_hi=la.GRACE_HI,
                     goal_z_range=LANDING_Z)
             return ast_fn
-        return plot, avoid, factory, (12, 72)
+        return plot, avoid, factory, (12, 50)
 
     raise ValueError(f"unknown example {ex}")
 
@@ -153,9 +152,11 @@ def main() -> None:
     print(f"T* = {T_star}   total solve time {t_total:.1f}s")
 
     out = f"output/paper/ex{ex}.png"
+    delivery_z = (0.0, 0.05) if ex == 2 else None
     plot_mission(X, T_star, mission_id=ex, dt=la.DT, regions=plot_regions,
                  obstacles=obstacles, v_min=la.V_MIN, v_max=la.V_MAX,
-                 cruise_z=la.CRUISE_Z_REF, landing_z=LANDING_Z, png_path=out)
+                 cruise_z=la.CRUISE_Z_REF, landing_z=LANDING_Z,
+                 delivery_z=delivery_z, png_path=out)
     print(f"plot saved -> {out}")
 
 

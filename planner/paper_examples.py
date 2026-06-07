@@ -94,18 +94,21 @@ def make_paper_example_2(
     obstacles: Sequence[Rect],
     v_min: float, grace_lo: int, grace_hi: int,
     goal_z_range: Optional[Tuple[float, float]] = None,
+    delivery_z_range: Optional[Tuple[float, float]] = (0.0, 0.05),
 ) -> STLNode:
     """
     Example 2 — timed multi-delivery, then land:
 
         φ_2 = ⋀_i ◇_[wi] P_i  ∧  ◇_[wg] (G1∨G2)  ∧ env
 
-    Each delivery is a reach with its own window; the final reach lands at a runway.
+    Each delivery is a reach with its own window; the aircraft must descend into
+    `delivery_z_range` (~0-50 m) over each drop, as in planner.examples. The final
+    reach lands at a runway.
     """
     authored = []
     for name, rect, win in deliveries:
         t1, t2 = win if win is not None else (0, T)
-        authored.append(Eventually(t1, t2, InRect(name, tuple(rect))))
+        authored.append(Eventually(t1, t2, InRect(name, tuple(rect), delivery_z_range)))
     gt1, gt2 = goal_window if goal_window is not None else (0, T)
     authored.append(Eventually(gt1, gt2, _goal_pred(goal_rects, T, goal_z_range)))
     env = _env_conjuncts(T, obstacles, v_min, grace_lo, grace_hi)
