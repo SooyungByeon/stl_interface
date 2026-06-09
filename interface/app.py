@@ -30,6 +30,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("QtAgg")
 import matplotlib.patches as mpatches
+import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -128,7 +129,8 @@ class MainWindow(QMainWindow):
         self.formula.setPlaceholderText("(authored STL appears here)")
         self.formula.setMinimumWidth(200); self.formula.setMaximumWidth(240)
         right.addWidget(self.formula, 3)
-        right.addWidget(QLabel("<b>Infeasibility resolution</b>"))
+        self.iis_label = QLabel("<b>Infeasibility resolution</b>")
+        right.addWidget(self.iis_label)
         self.iis = QTextEdit(); self.iis.setReadOnly(True)
         self.iis.setPlaceholderText("(on infeasible plans, the responsible gestures appear here)")
         self.iis.setMinimumWidth(200); self.iis.setMaximumWidth(240)
@@ -306,6 +308,7 @@ class MainWindow(QMainWindow):
             self.iis_regions.clear()
             self.iis_buttons.clear()
             self.iis.setPlainText("Feasible — trajectory found.")
+            self._set_iis_infeasible_style(False)
             self.status(f"Feasible at T={res['T']}")
         else:
             rep = res["iis"]
@@ -313,14 +316,25 @@ class MainWindow(QMainWindow):
             # flag the Window button if any implicated requirement carries a window
             self.iis_buttons = {"Window"} if any(r.window_gid for r in rep.requirements) else set()
             self.iis.setPlainText(rep.text)
+            self._set_iis_infeasible_style(True)
             self.status(f"INFEASIBLE at T={res['T']} — see IIS panel")
         self._apply_button_highlights()
         self.redraw(); self.update_formula()
         return res
 
+    def _set_iis_infeasible_style(self, on: bool):
+        """Turn the IIS label/box transparent red on infeasible plans; else restore."""
+        if on:
+            self.iis_label.setStyleSheet("color: red;")
+            self.iis.setStyleSheet("background-color: rgba(255, 0, 0, 40);")
+        else:
+            self.iis_label.setStyleSheet("")
+            self.iis.setStyleSheet("")
+
     def _invalidate(self):
         """A gesture edit invalidates any previous plan."""
         self.result = None; self.iis_regions.clear(); self.iis_buttons.clear()
+        self._set_iis_infeasible_style(False)
         self._apply_button_highlights()
         self.redraw(); self.update_formula()
 
@@ -366,8 +380,10 @@ class MainWindow(QMainWindow):
         anchor_names = set(self.or_anchor.region_names) if self.or_anchor else set()
         for name, r in self.program.regions.items():
             fc, ec, ls = role_style[self._region_role(name)]
-            if name in self.iis_regions:
-                ec, lw, alpha = "red", 3.2, 0.40
+            failed = name in self.iis_regions
+            hatch = None
+            if failed:
+                fc, ec, ls, lw, alpha, hatch = "red", "red", "-", 4.0, 0.50, "xx"
             elif name in anchor_names:
                 ec, lw, alpha = "cyan", 3.0, 0.38
             else:
@@ -375,14 +391,26 @@ class MainWindow(QMainWindow):
             if r.shape == "circle" and r.circle is not None:
                 cx, cy, rad = r.circle
                 ax.add_patch(mpatches.Circle((cx, cy), rad, facecolor=fc, edgecolor=ec,
-                             alpha=alpha, linewidth=lw, linestyle=ls, zorder=4))
+                             alpha=alpha, linewidth=lw, linestyle=ls, hatch=hatch, zorder=4))
             else:
                 x1, x2, y1, y2 = r.rect
                 cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                rad = max(x2 - x1, y2 - y1) / 2.0
                 ax.add_patch(mpatches.Rectangle((x1, y1), x2 - x1, y2 - y1, facecolor=fc,
-                             edgecolor=ec, alpha=alpha, linewidth=lw, linestyle=ls, zorder=4))
-            ax.text(cx, cy, name, ha="center", va="center",
-                    fontsize=10, fontweight="bold", zorder=7)
+                             edgecolor=ec, alpha=alpha, linewidth=lw, linestyle=ls,
+                             hatch=hatch, zorder=4))
+            if failed:
+                # big, hard-to-miss failure indicator: red ring + bold ✗ badge
+                ax.add_patch(mpatches.Circle((cx, cy), rad * 1.9, fill=False,
+                             edgecolor="red", linewidth=3.0, linestyle="--", zorder=11))
+                ax.plot(cx, cy, marker="X", markersize=26, markeredgewidth=2.5,
+                        color="red", markeredgecolor="white", zorder=12)
+                ax.text(cx, cy + rad * 2.1, name, ha="center", va="bottom",
+                        fontsize=11, fontweight="bold", color="red", zorder=12,
+                        path_effects=[pe.withStroke(linewidth=2.5, foreground="white")])
+            else:
+                ax.text(cx, cy, name, ha="center", va="center",
+                        fontsize=10, fontweight="bold", zorder=7)
 
         # until arrows: key --> door  (¬door U key)
         for req in self.program.requirements:
